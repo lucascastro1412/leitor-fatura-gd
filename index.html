@@ -92,9 +92,7 @@ code{background:#eef1f4;padding:1px 5px;border-radius:4px;font-size:12.5px}
   <div class="body">
     <div id="seletor" class="sel"></div>
     <div id="aviso" class="ok-msg" hidden></div>
-    <div class="msg m-w" style="margin:0 0 16px">Nenhuma usina cadastrada nesta versão pública.
-      Use <b>Carregar de arquivo</b> para trazer o perfil (.json) da usina, ou preencha os campos à mão.
-      Os perfis não acompanham a página porque contêm dados contratuais e bancários.</div>
+    
     <div class="grid" id="form"></div>
     <div class="row" style="margin-top:18px">
       <button class="ghost" onclick="salvarPerfil()">Exportar este perfil</button>
@@ -569,7 +567,64 @@ async function gerarXlsx(JSZipCls, templateBytes, f, p){
 </script>
 <script>/* ================= biblioteca de perfis das usinas =================
    Para incluir uma usina nova, acrescente um bloco aqui com a mesma estrutura. */
-const PERFIS = {};
+const PERFIS = {
+  'UFV Líder — Chapecó/SC (Celesc)': {
+    empresa:'UFV LIDER AIPF SPE LTDA', cnpj:'54.264.795/0001-74',
+    potencia:300, energiaContratada:60435, dbContrato:'2025-09-01',
+    reajuste:0, desagio:28, rateio:50, prazo:90, imovel:700, equip:2000, om:1500,
+    tusd:373.75, te:321.93, icms:17, pis:1.10, cofins:5.06, grossUp:'Sim',
+    banco:'Sicoob Maxicredito', agencia:'3069',
+    contaEquip:'474.266-4', contaOM:'474.266-5', contaImovel:'474.266-6', pix:''
+  },
+  'UFV Cecchetti — F&N Solar Energy (Celesc)': {
+    empresa:'F&N SOLAR ENERGY LTDA.', cnpj:'54.705.909/0001-74',
+    potencia:300, energiaContratada:60435, dbContrato:'2025-10-01',
+    reajuste:0, desagio:28, rateio:50, prazo:90, imovel:700, equip:2000, om:1500,
+    tusd:373.75, te:321.93, icms:17, pis:1.10, cofins:5.06, grossUp:'Sim',
+    banco:'133', agencia:'2613',
+    contaEquip:'45696-9', contaOM:'45696-9', contaImovel:'45696-9', pix:'54.705.909/0001-74'
+  },
+  'Ermes — Fazenda Beira Lago (Celesc)': {
+    empresa:'FAZENDA BEIRA LAGO ENERGIA LTDA', cnpj:'52.903.647/0001-27',
+    potencia:300, energiaContratada:54750, dbContrato:'2024-06-01',
+    reajuste:5.31964, desagio:25, rateio:50, prazo:90, imovel:1500, equip:10000, om:3700,
+    tusd:373.75, te:321.93, icms:17, pis:1.10, cofins:5.06, grossUp:'Sim',
+    banco:'Banco do Brasil', agencia:'0321-2',
+    contaEquip:'130.295-7', contaOM:'130.295-7', contaImovel:'130.295-7', pix:''
+  },
+  'CGH Ouro Verde — Iguatu/PR (Copel)': {
+    empresa:'OURO VERDE ENERGÉTICA LTDA', cnpj:'05.138.553/0001-29',
+    potencia:5000, energiaContratada:2007500, dbContrato:'2024-08-01',
+    reajuste:5.22522, desagio:25, rateio:0, prazo:60, prazoOM:5, prazoImovel:5, imovel:50000, equip:250000, om:100000,
+    tusd:457.17, te:310.85, icms:19, pis:1.57, cofins:7.21, grossUp:'Não',
+    banco:'Banco do Brasil', agencia:'4693-0',
+    contaEquip:'0018-3', contaOM:'0018-3', contaImovel:'0018-3', pix:''
+  },
+  'Estância Paraná — Noroeste Energia (Copel)': {
+    empresa:'NOROESTE ENERGIA LTDA', cnpj:'35.079.560/0002-49',
+    potencia:2000, energiaContratada:436196, dbContrato:'2024-06-27',
+    reajuste:5.31964, desagio:26, rateio:50, prazo:90, imovel:15120.80, equip:50000, om:15120.80,
+    tusd:457.17, te:310.85, icms:19, pis:1.57, cofins:7.21, grossUp:'Não',
+    banco:'208 - BTG', agencia:'50',
+    contaEquip:'435214-6', contaOM:'435214-6', contaImovel:'435214-6', pix:'35.079.560/0001-68'
+  },
+  'Loanda I.2 + I.3 — FTS Geração (Copel)': {
+    empresa:'FTS GERAÇÃO DE ENERGIA S.A.', cnpj:'45.192.849/0001-42',
+    potencia:1500, energiaContratada:273750, dbContrato:'2024-07-29',
+    reajuste:5.35117, desagio:24, rateio:50, prazo:60, imovel:3500, equip:10000, om:6000,
+    tusd:457.17, te:310.85, icms:19, pis:1.54, cofins:7.07, grossUp:'Não',
+    banco:'BRADESCO', agencia:'3645',
+    contaEquip:'7363-6', contaOM:'7363-6', contaImovel:'7363-6', pix:'45.192.849/0001-42'
+  },
+  'UHE Jaracatiá — Usina Hidrelétrica Jaracatiá (Copel)': {
+    empresa:'USINA Hidreletrica Jaracatia Ltda', cnpj:'18.464.912/0001-80',
+    potencia:2430, energiaContratada:975645, dbContrato:'2024-09-01',
+    reajuste:5, desagio:26, rateio:50, prazo:90, imovel:12350.76, equip:100000, om:37052.29,
+    tusd:457.17, te:310.85, icms:19, pis:1.54, cofins:7.07, grossUp:'Não',
+    banco:'748', agencia:'737',
+    contaEquip:'33209-9', contaOM:'33209-9', contaImovel:'33209-9', pix:'18.464.912/0001-80'
+  }
+};
 
 /* ================= campos do perfil ================= */
 const CAMPOS = [
