@@ -1,0 +1,31 @@
+{
+  "nome": "UFV Exemplo — Cidade/UF (Distribuidora)",
+  "perfil": {
+    "empresa": "NOME DA SPE LTDA",
+    "cnpj": "00.000.000/0001-00",
+    "potencia": 300,
+    "energiaContratada": 60000,
+    "dbContrato": "2025-01-01",
+    "reajuste": 0,
+    "desagio": 25,
+    "rateio": 50,
+    "prazo": 90,
+    "prazoOM": "",
+    "prazoImovel": "",
+    "imovel": 1000,
+    "equip": 2000,
+    "om": 1500,
+    "tusd": 373.75,
+    "te": 321.93,
+    "icms": 17,
+    "pis": 1.1,
+    "cofins": 5.06,
+    "grossUp": "Sim",
+    "banco": "Nome do banco",
+    "agencia": "0000",
+    "contaEquip": "00000-0",
+    "contaOM": "00000-0",
+    "contaImovel": "00000-0",
+    "pix": ""
+  }
+}

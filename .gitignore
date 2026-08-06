@@ -1,0 +1,5 @@
+# perfis reais das usinas - contem dados contratuais e bancarios
+perfis/*.json
+!perfis/_exemplo.json
+# arquivos gerados
+*.xlsx
