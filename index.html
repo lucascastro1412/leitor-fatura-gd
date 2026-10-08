@@ -690,7 +690,10 @@ function calcular(f, p){                       // f = fatura lida, p = parâmetr
   c.B36 = (p.vlocEquipReaj ? p.equip*(1+p.reajuste) : p.equip) + c.B35;  // Vlocação
   c.C36 = c.B30 ? (p.imovel+p.om+c.B36)/c.B30 : 0;
   c.comMWh = (p.comissaoMWh!=null && p.comissaoMWh!=='' ) ? Number(p.comissaoMWh) : null;
-  c.B74 = c.comMWh ? c.B30/1000*c.comMWh : null;
+  c.comPct = (p.comissaoTipo === '% sobre contratos');
+  // base da comissão percentual: a soma das três linhas de contrato da máscara
+  c.comBase = p.imovel*(1+p.reajuste) + c.B36 + p.om*(1+p.reajuste);
+  c.B74 = c.comMWh ? (c.comPct ? c.comBase*c.comMWh/100 : c.B30/1000*c.comMWh) : null;
   c.abertura = f.abertura;
   c.F53 = f.abertura.reduce((a,b)=>a+b,0);
   c.F54 = R2(c.F53 - c.B31);
@@ -737,6 +740,18 @@ function setFormula(xml, ref, formula, valor){
   const v = (typeof valor==='number' && isFinite(valor)) ? '<v>'+valor+'</v>' : '';
   return xml.replace(re, () => '<c r="'+ref+'"'+attrs+'><f>'+formula+'</f>'+v+'</c>');
 }
+function limparVazias(xml, refs, forcar){
+  for(const ref of refs){
+    const re = new RegExp('<c r="'+ref+'"([^>]*?)(?:/>|>([\\s\\S]*?)</c>)');
+    const m = xml.match(re);
+    if(!m) continue;
+    const fm = (m[2]||'').match(/<f[^>]*>([\s\S]*?)<\/f>/);
+    if(!fm || (!forcar && /^IF\(/i.test(fm[1]))) continue;  // sem fórmula, ou condicional que já devolve vazio
+    const attrs = (m[1]||'').replace(/\s*t="[^"]*"/g,'');
+    xml = xml.replace(re, () => '<c r="'+ref+'"'+attrs+'/>');
+  }
+  return xml;
+}
 function checarDuplicatas(pares, aba){
   const vistos = new Set(), dup = [];
   for(const [ref] of pares){ if(vistos.has(ref)) dup.push(ref); vistos.add(ref); }
@@ -762,8 +777,10 @@ function mapaDados(f, p, c){
   m[R.SEMT]=c.B28; m[R.COMPT]=c.B29; m[R.VUN]=c.B18;
   m[R.INJF]=f.injFP; m[R.INJP]=f.injPT; m[R.CONF]=f.consFP; m[R.CONP]=f.consPT;
   m[R.SALD]=f.saldoFP; m[R.FATT]=c.B31;
-  m[R.TEFP]=c.F37; m[R.TEPT]=c.F38; m[R.FTEO]=c.F39; m[R.EXC]=c.F40;
-  m[R.CONV]=c.F41; m[R.FEFE]=c.F44; m[R.EXCT]=c.F42; m[R.DIVE]=c.F43;
+  const temConv = (f.distribuidora===undefined || f.distribuidora==='CELESC');
+  m[R.TEFP]=c.F37; m[R.TEPT]=c.F38; m[R.EXC]=c.F40;
+  m[R.FTEO]=temConv?c.F39:''; m[R.CONV]=temConv?c.F41:'';
+  m[R.FEFE]=temConv?c.F44:''; m[R.EXCT]=temConv?c.F42:''; m[R.DIVE]=temConv?c.F43:'';
   R.AB.forEach((ref,i)=> m[ref]=f.abertura[i]);
   m[R.ABT]=c.F53; m[R.ABD]=c.F54; m[R.ABDE]=c.F55; m[R.ABPC]=c.F56;
   m[R.ENER]=c.B30; m[R.RECE]=c.B30*c.B18; m[R.VB]=c.B37; m[R.VCUS]=c.B34;
@@ -775,7 +792,7 @@ function mapaDados(f, p, c){
     m[t.venc]=XLDATE({'Loc. Equipamento':c.dtVenc,'O&M':c.dtVencOM,'Loc. Imovel':c.dtVencImovel}[k]); }
   const t=R.CTC;
   if(c.comMWh){
-    m[R.COMLB]='Comissão sobre energia'; m[R.COMU]='R$/MWh'; m[R.COMR]=c.comMWh; m[R.COMV]=c.B74;
+    m[R.COMLB]=c.comPct?'Comissão sobre os contratos':'Comissão sobre energia'; m[R.COMU]=c.comPct?'%':'R$/MWh'; m[R.COMR]=c.comMWh; m[R.COMV]=c.B74;
     m[t.lbl]='Comissão'; m[t.emp]=p.comissaoEmp||p.empresa; m[t.cnpj]=p.comissaoCnpj||p.cnpj;
     m[t.banco]=p.comissaoBanco||''; m[t.ag]=p.comissaoAgencia||''; m[t.cc]=p.comissaoConta||'';
     m[t.pix]=p.comissaoPix||''; m[t.venc]=XLDATE(c.dtVenc);
@@ -813,8 +830,14 @@ function mapaConferencia(f, p, c){
   const crus =[f.uc,f.ucAntiga,f.competencia,f.emissao,f.total,f.injFP,f.injPT,f.consFP,f.consPT,f.teFP,f.tePT,f.excFP];
   lidos.forEach((v,i)=>{ m['C'+(CONF.C0+i)]=v; m['E'+(CONF.C0+i)]=(crus[i]===null||crus[i]===undefined)?'NÃO LIDO':'OK'; });
   const K=CONF.CHK;
-  m['C'+K]=c.F44;      m['D'+K]=c.F39;   m['E'+K]=tol(c.F44,c.F39,0.005);
-  m['C'+(K+1)]=c.F40;  m['D'+(K+1)]=c.F42; m['E'+(K+1)]=tol(c.F40,c.F42,1);
+  const conv = (f.distribuidora===undefined || f.distribuidora==='CELESC');
+  if(conv){
+    m['C'+K]=c.F44;      m['D'+K]=c.F39;   m['E'+K]=tol(c.F44,c.F39,0.005);
+    m['C'+(K+1)]=c.F40;  m['D'+(K+1)]=c.F42; m['E'+(K+1)]=tol(c.F40,c.F42,1);
+  } else {
+    m['C'+K]='';         m['D'+K]='';        m['E'+K]='NÃO SE APLICA';
+    m['C'+(K+1)]='';     m['D'+(K+1)]='';    m['E'+(K+1)]='NÃO SE APLICA';
+  }
   m['C'+(K+2)]=c.F53;  m['D'+(K+2)]=c.B31; m['E'+(K+2)]=tol(c.F53,c.B31,0.05);
   m['C'+(K+3)]=c.B35;  m['D'+(K+3)]=c.N23; m['E'+(K+3)]=tol(c.B35,c.N23,0.01);
   [c.B30, c.B30*c.B18, c.B37, c.B35, c.B36, c.C36, c.F56].forEach((v,i)=> m['C'+(CONF.RES+i)]=v);
@@ -830,7 +853,9 @@ function mapaComissao(f, p, c){
     D6:XLDATE(c.dtComp), D8:f.uc, I8:p.potencia, M8:p.energiaContratada,
     D12:XLDATE(p.dbContrato), I12:c.comMWh, N12:p.reajuste,
     D14:c.B30, I14:c.B29, N14:c.B31,
-    D18:c.B30/1000, D24:c.B74,
+    B18:(c.comPct?'Base — contratos':'Energia'), E18:(c.comPct?'R$':'MWh'),
+    H12:(c.comPct?'Comissão (%)':'Vunit'),
+    D18:(c.comPct?c.comBase:c.B30/1000), D24:c.B74,
     F24:(p.comissaoEmp||p.empresa), L24:(p.comissaoCnpj||p.cnpj), N24:XLDATE(c.dtVenc)
   };
 }
@@ -846,6 +871,8 @@ async function gerarXlsx(JSZipCls, templateBytes, f, p){
                 'xl/worksheets/sheet4.xml':mapaComissao(f,p,c)};
   for(const arq in alvo){
     checarDuplicatas(Object.entries(alvo[arq]), arq);
+    const vazias = Object.keys(alvo[arq]).filter(k=>{
+      const v = alvo[arq][k]; return v===''||v===null||v===undefined; });
     let xml = await zip.file(arq).async('string');
     xml = setCells(xml, alvo[arq], faltando);
     if(arq==='xl/worksheets/sheet3.xml')
@@ -854,6 +881,25 @@ async function gerarXlsx(JSZipCls, templateBytes, f, p){
       xml = setFormula(xml, REF.VLOC, p.vlocEquipReaj ? 'B21*(1+B16)+B71' : 'B21+B71', c.B36);
       xml = setFormula(xml, REF.COMPT, p.grossUp
               ? '(B26/(1-(B29+B30))+B27/(1-B28)/(1-(B29+B30)))/1000' : 'B31', c.B29);
+      if(!(f.distribuidora===undefined||f.distribuidora==='CELESC'))
+        xml = setFormula(xml, REF.FEFE, '""');
+      if(c.comMWh) xml = setFormula(xml, REF.COMV, c.comPct
+              ? 'IF(D74="","",(B20*(1+B16)+B72+B22*(1+B16))*D74/100)'
+              : 'IF(D74="","",B67/1000*D74)', c.B74);
+    }
+    if(arq==='xl/worksheets/sheet4.xml' && c.comMWh){
+      xml = setFormula(xml, 'D18', c.comPct
+              ? 'IF(Dados!D74="","",Dados!B20*(1+Dados!B16)+Dados!B72+Dados!B22*(1+Dados!B16))'
+              : 'IF(Dados!D74="","",D14/1000)', c.comPct?c.comBase:c.B30/1000);
+      xml = setFormula(xml, 'D24', c.comPct
+              ? 'IF(Dados!D74="","",D18*I12/100)'
+              : 'IF(Dados!D74="","",D18*I12)', c.B74);
+    }
+    xml = limparVazias(xml, vazias);
+    if(!c.comMWh){
+      if(arq==='xl/worksheets/sheet2.xml') xml = limparVazias(xml, [REF.COMV], true);
+      if(arq==='xl/worksheets/sheet4.xml')
+        xml = limparVazias(xml, ['D6','D8','I8','M8','D12','I12','N12','D14','I14','N14','D18','D24','N24'], true);
     }
     zip.file(arq, xml);
   }
@@ -933,9 +979,11 @@ const PERFIS = {
     empresa:'USINA Hidreletrica Jaracatia Ltda', cnpj:'18.464.912/0001-80',
     potencia:2430, energiaContratada:975645, dbContrato:'2024-09-01',
     reajuste:5, desagio:26, rateio:50, prazo:90, imovel:12350.76, equip:100000, om:37052.29,
-    tusd:457.17, te:310.85, icms:19, pis:1.54, cofins:7.07, grossUp:'Não',
+    tusd:457.17, te:310.85, icms:19, pis:1.54, cofins:7.07, grossUp:'Não', vlocEquipReaj:'Sim',
     banco:'748', agencia:'737',
-    contaEquip:'33209-9', contaOM:'33209-9', contaImovel:'33209-9', pix:'18.464.912/0001-80'
+    contaEquip:'33209-9', contaOM:'33209-9', contaImovel:'33209-9', pix:'18.464.912/0001-80',
+    comissaoMWh:3.54, comissaoTipo:'% sobre contratos',
+    comissaoEmp:'LIGA EMPREENDIMENTOS IMOBILIARIOS LTDA', comissaoCnpj:'23.267.601/0001-60'
   },
   'UFV Porto Real (5 UCs) — SPE Porto Real Isollar CDL (Ampla/Enel RJ)': {
     empresa:'SPE PORTO REAL ISOLLAR CDL LTDA', cnpj:'56.124.521/0001-05',
@@ -982,7 +1030,8 @@ const CAMPOS = [
  {k:'contaImovel',l:'Conta — locação imóvel',      t:'text', v:'474.266-6'},
  {k:'pix',        l:'Chave PIX (opcional)',        t:'text', v:''},
  {s:'Comissão por energia (opcional — vira um contrato a mais na máscara)'},
- {k:'comissaoMWh',     l:'Comissão (R$/MWh)', t:'number', v:'', st:'any'},
+ {k:'comissaoTipo',    l:'Base da comissão', t:'select', v:'R$/MWh', op:['R$/MWh','% sobre contratos']},
+ {k:'comissaoMWh',     l:'Comissão (R$/MWh ou %)', t:'number', v:'', st:'any'},
  {k:'comissaoEmp',     l:'Empresa da comissão', t:'text', v:''},
  {k:'comissaoCnpj',    l:'CNPJ da comissão',    t:'text', v:''},
  {k:'comissaoBanco',   l:'Banco da comissão',   t:'text', v:''},
@@ -1157,7 +1206,7 @@ async function processar(files){
           <table><tr><th colspan="2">Energia e resultado</th></tr>
             <tr><td>Injetada FP / PT</td><td class="n">${fmt(f.injFP)} / ${fmt(f.injPT)} kWh</td></tr>
             <tr><td>Consumo FP / PT</td><td class="n">${fmt(f.consFP)} / ${fmt(f.consPT)} kWh</td></tr>
-            <tr><td>Conversão de posto (fator ${c.F44?c.F44.toFixed(4):'—'}${c.F44&&Math.abs(c.F44-c.F39)>0.005?' · teórico '+c.F39.toFixed(4):''})</td><td class="n">${fmt(c.F41)} kWh</td></tr>
+            ${(f.distribuidora===undefined||f.distribuidora==='CELESC')?`<tr><td>Conversão de posto (fator ${c.F44?c.F44.toFixed(4):'—'}${c.F44&&Math.abs(c.F44-c.F39)>0.005?' · teórico '+c.F39.toFixed(4):''})</td><td class="n">${fmt(c.F41)} kWh</td></tr>`:''}
             <tr><td><b>Excedente remunerado</b></td><td class="n"><b>${fmt(c.F40)} kWh</b></td></tr>
             <tr><td>Receita de energia · VB</td><td class="n">R$ ${fmt(c.B30*c.B18,2)} · R$ ${fmt(c.B37,2)}</td></tr>
             <tr><td><b>Vperf · Vlocação</b></td><td class="n"><b>R$ ${fmt(c.B35,2)} · R$ ${fmt(c.B36,2)}</b></td></tr>
