@@ -170,6 +170,20 @@ const num = s => { if(s==null) return null; s=String(s).trim();
   const v = parseFloat(s); if(isNaN(v)) return null; return neg? -v : v; };
 const NUM = '-?[\\d.]+,\\d+-?|-?\\d[\\d.]*-?';
 
+/* Regra do contrato: quando a fatura traz desconto por pagamento em duplicidade, a base
+   de custo da medição é o valor que a fatura teria sem esse lançamento — nunca o total
+   abatido. Vale para qualquer distribuidora que classifique esses itens. */
+function baseSemDupl(out, valorDupl, W){
+  if(out.total==null || Math.abs(valorDupl)<=0.005) return null;
+  const base = Math.round((out.total - valorDupl)*100)/100;
+  const brl = v => 'R$ '+v.toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
+  W(`A fatura abate ${brl(Math.abs(valorDupl))} de pagamento em duplicidade e fechou em `
+    + `${brl(out.total)}. A medição usa ${brl(base)}, que é o que a fatura seria sem esse `
+    + 'abatimento — é a regra do contrato, não uma escolha da leitura.');
+  return base;
+}
+if (typeof module!=='undefined') module.exports = {baseSemDupl};
+
 function parseFatura(lines){
   const cab = lines.slice(0,40).join('\n');
   if(/CEMIG|06\\.?981\\.?180/i.test(cab)) return parseCemig(lines);
@@ -621,11 +635,14 @@ function parseAmpla(lines){
   const eBan = i=>/Bandeira|Adicional|Band\./i.test(i.desc);
   const eEne = i=>/^Energia Atv Forn|^Energ Atv Inj/i.test(i.desc);
   const s = f => out.itens.filter(f).reduce((a,i)=>a+i.valor,0);
+  const eDup2 = i=>/Duplicidade|N[ãa]o Loc|Cr[ée]dito Pr[óo]ximas Faturas/i.test(i.desc);
   out.abertura = [ s(eDem), 0, s(eRea), s(eEne), s(eBan),
-                   s(i=>!eDem(i)&&!eRea(i)&&!eBan(i)&&!eEne(i)) ];
+                   s(i=>!eDem(i)&&!eRea(i)&&!eBan(i)&&!eEne(i)&&!eDup2(i)) ];
+  out.custoBase = baseSemDupl(out, s(eDup2), W);
   const sAb = out.abertura.reduce((a,b)=>a+b,0);
-  if(out.total!=null && Math.abs(sAb-out.total)>0.05)
-    W(`Os itens somam R$ ${sAb.toFixed(2)} contra o total de R$ ${out.total.toFixed(2)} — diferença de R$ ${(sAb-out.total).toFixed(2)}.`);
+  const alvoAb = (out.custoBase!=null) ? out.custoBase : out.total;
+  if(alvoAb!=null && Math.abs(sAb-alvoAb)>0.05)
+    W(`Os itens somam R$ ${sAb.toFixed(2)} contra R$ ${alvoAb.toFixed(2)} — diferença de R$ ${(sAb-alvoAb).toFixed(2)}.`);
 
   /* ---------- energia ----------
      consumo vem da quantidade dos itens de fornecimento;
@@ -734,29 +751,30 @@ function parseCemig(lines){
 
   /* ---------- abertura ---------- */
   const soma = f => out.itens.filter(f).reduce((a,i)=>a+i.valor,0);
+  const eDupl = i => /Restitui[çc][ãa]o de Pagamento|Restitui[çc][ãa]o|Saldo para o pr[óo]ximo|Devolu[çc][ãa]o em dobro|Atualiza[çc][ãa]o monet/i.test(i.desc);
   const eUlt = i => /Ultrapassagem/i.test(i.desc);
   const eDem = i => /^Demanda\b/i.test(i.desc) && !eUlt(i);
   const eRea = i => /Reativa|UFER|UFDR/i.test(i.desc);
   const eBan = i => /Bandeira|Adicional Band/i.test(i.desc);
   const eEne = i => /^Energia\b/i.test(i.desc) && !eRea(i) && !eBan(i);
   out.abertura = [ soma(eDem), soma(eUlt), soma(eRea), soma(eEne), soma(eBan),
-                   soma(i=>!eDem(i)&&!eUlt(i)&&!eRea(i)&&!eBan(i)&&!eEne(i)) ];
+                   soma(i=>!eDem(i)&&!eUlt(i)&&!eRea(i)&&!eBan(i)&&!eEne(i)&&!eDupl(i)) ];
+  out.custoBase = baseSemDupl(out, soma(eDupl), W);
   const sAb = out.abertura.reduce((a,b)=>a+b,0);
-  if(out.total!=null && Math.abs(sAb-out.total)>0.05)
-    W(`Os itens somam R$ ${sAb.toFixed(2)} contra o total de R$ ${out.total.toFixed(2)} — diferença de R$ ${(sAb-out.total).toFixed(2)}.`);
+  const alvoAb = (out.custoBase!=null) ? out.custoBase : out.total;
+  if(alvoAb!=null && Math.abs(sAb-alvoAb)>0.05)
+    W(`Os itens somam R$ ${sAb.toFixed(2)} contra R$ ${alvoAb.toFixed(2)} — diferença de R$ ${(sAb-alvoAb).toFixed(2)}.`);
 
   /* ---------- lançamentos avulsos e base de custo "limpa" ---------- */
   const eAvulso = i => /Multa|Juros|Corre[çc][ãa]o|Restitui[çc][ãa]o|Saldo para o pr[óo]ximo|Devolu[çc][ãa]o em dobro|Atualiza[çc][ãa]o monet/i.test(i.desc);
   out.atraso    = soma(i=>/Multa|Juros|Corre[çc][ãa]o/i.test(i.desc));
-  out.credito   = soma(i=>/Restitui[çc][ãa]o|Saldo para o pr[óo]ximo|Devolu[çc][ãa]o em dobro|Atualiza[çc][ãa]o monet/i.test(i.desc));
+  out.credito   = soma(eDupl);
   out.cip = 0; out.subFat = null;
   out.custoLimpo = (out.total!=null) ? out.total - soma(eAvulso) : null;
-  const avulsos = [];
-  if(Math.abs(out.atraso)>0.005)  avulsos.push(`juros/multa/correção R$ ${out.atraso.toFixed(2)}`);
-  if(Math.abs(out.credito)>0.005) avulsos.push(`restituição/saldo transferido R$ ${out.credito.toFixed(2)}`);
-  if(avulsos.length)
-    W(`A fatura traz lançamentos avulsos (${avulsos.join('; ')}). O total é R$ ${(out.total||0).toFixed(2)}, `
-      + `mas o custo do mês sem esses lançamentos é R$ ${out.custoLimpo.toFixed(2)}. Confira qual base a medição deve usar.`);
+  /* o bloco de duplicidade já virou base de custo acima; aqui só o que ainda é escolha */
+  if(Math.abs(out.atraso)>0.005)
+    W(`A fatura traz juros/multa/correção de R$ ${out.atraso.toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2})}, `
+      + 'referentes a competência anterior. Defina se esse custo é repassado na medição.');
 
   /* ---------- constante de medição (bloco CONSTANTES) ----------
      varia por UC (350 em Riachinho, 1.400 em Salinas) e em algumas faturas o fator
@@ -851,7 +869,8 @@ function parseCemig(lines){
   if(/Faturamento pela m[ée]dia/i.test(txt))
     W('A fatura traz "Faturamento pela média" — as grandezas do mês não foram medidas normalmente. '
       + 'Confira a competência antes de fechar a medição.');
-  if(out.total===0) W('A fatura fechou em R$ 0,00 — há crédito compensando o valor do mês. '
+  if(out.total===0 && out.custoBase==null)
+    W('A fatura fechou em R$ 0,00 — há crédito compensando o valor do mês. '
     + 'Confira se o repasse de custo deve considerar esse mês como zero.');
   return out;
 }
@@ -887,7 +906,9 @@ function calcular(f, p){                       // f = fatura lida, p = parâmetr
   c.F44 = ptCob ? c.F41/ptCob : 0;                      // fator efetivo praticado pela distribuidora
   c.F34 = c.F40; c.B30 = c.F34;
   /* base de custo: total da fatura ou faturamento do mês + CIP, sem lançamentos avulsos */
-  c.B31 = (p.baseCusto==='limpo' && f.custoLimpo!=null) ? f.custoLimpo : f.total;
+  c.B31 = (f.custoBase!=null) ? f.custoBase
+        : ((p.baseCusto==='limpo' && f.custoLimpo!=null) ? f.custoLimpo : f.total);
+  c.baseAjustada = (f.custoBase!=null);
   c.B34 = -((p.imovel+p.om)*(1+p.reajuste) + c.B31);    // Vcusto
   c.B37 = c.B30*((c.Q-c.P)/1000*p.rateio);              // VB
   c.B35 = c.B30*c.B18 - p.equip*(1+p.reajuste) + c.B34 + c.B37;   // Vperf
@@ -899,10 +920,10 @@ function calcular(f, p){                       // f = fatura lida, p = parâmetr
   c.comBase = p.imovel*(1+p.reajuste) + c.B36 + p.om*(1+p.reajuste);
   c.B74 = c.comMWh ? (c.comPct ? c.comBase*c.comMWh/100 : c.B30/1000*c.comMWh) : null;
   c.abertura = f.abertura;
-  c.F53 = f.abertura.reduce((a,b)=>a+b,0);
+  c.F53 = R2(f.abertura.reduce((a,b)=>a+b,0));
   c.F54 = R2(c.F53 - c.B31);
-  c.F55 = f.abertura[0]+f.abertura[1];
-  c.F56 = c.F53 ? c.F55/c.F53 : 0;
+  c.F55 = R2(f.abertura[0]+f.abertura[1]);
+  c.F56 = (Math.abs(c.F53)>0.005) ? c.F55/c.F53 : '';
   // máscara
   c.H15 = p.imovel*(1+p.reajuste); c.H16 = p.equip*(1+p.reajuste); c.H17 = p.om*(1+p.reajuste);
   c.J23 = c.B31 + c.H15 + c.H17;
@@ -986,6 +1007,7 @@ function mapaDados(f, p, c){
   m[R.SEMT]=c.B28; m[R.COMPT]=c.B29; m[R.VUN]=c.B18;
   m[R.INJF]=f.injFP; m[R.INJP]=f.injPT; m[R.CONF]=f.consFP; m[R.CONP]=f.consPT;
   m[R.SALD]=f.saldoFP; m[R.FATT]=c.B31;
+  if(c.baseAjustada) m['A41']='Fatura da usina — base de custo, sem o pagamento em duplicidade (R$)';
   const temConv = (f.distribuidora===undefined || f.distribuidora==='CELESC');
   m[R.TEFP]=c.F37; m[R.TEPT]=c.F38; m[R.EXC]=c.F40;
   m[R.FTEO]=temConv?c.F39:''; m[R.CONV]=temConv?c.F41:'';
@@ -1035,6 +1057,11 @@ function mapaConferencia(f, p, c){
     B3:`UC ${f.uc||'—'} · competência ${f.competencia||'—'} · NF ${f.nf||'—'} · emissão ${f.emissao||'—'} · total R$ ${(f.total||0).toLocaleString('pt-BR',{minimumFractionDigits:2})}`,
     B4:`${f.nome||''}${f.cnpj?' · CNPJ '+f.cnpj:''}${f.distribuidora&&f.distribuidora!=='CELESC'?' · '+f.distribuidora:(f.layout?' · layout '+(f.layout==='pre-1095'?'anterior à REN 1095/24':'pós REN 1095/24'):'')}`
   };
+  if(c.baseAjustada){
+    m['B'+(CONF.C0+4)]='Base de custo (R$) — total da fatura R$ '
+      + (f.total||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
+    m['B'+(CONF.CHK+2)]='Itens da fatura somam a base de custo';
+  }
   const lidos=[f.uc,f.ucAntiga,XLDATE(c.dtComp),XLDATE(c.dtEmissao),c.B31,f.injFP,f.injPT,f.consFP,f.consPT,c.F37,c.F38,c.F40];
   const crus =[f.uc,f.ucAntiga,f.competencia,f.emissao,f.total,f.injFP,f.injPT,f.consFP,f.consPT,f.teFP,f.tePT,f.excFP];
   lidos.forEach((v,i)=>{ m['C'+(CONF.C0+i)]=v; m['E'+(CONF.C0+i)]=(crus[i]===null||crus[i]===undefined)?'NÃO LIDO':'OK'; });
@@ -1094,6 +1121,7 @@ async function gerarXlsx(JSZipCls, templateBytes, f, p){
       xml = setFormula(xml, 'D31', p.vlocEquipReaj ? 'Dados!B21*(1+Dados!B16)+N23' : 'Dados!B21+N23', c.D31);
     if(arq==='xl/worksheets/sheet2.xml'){
       xml = setFormula(xml, REF.VLOC, p.vlocEquipReaj ? 'B21*(1+B16)+B71' : 'B21+B71', c.B36);
+      xml = setFormula(xml, REF.ABPC, 'IF('+REF.ABT+'=0,"",'+REF.ABDE+'/'+REF.ABT+')', c.F56);
       xml = setFormula(xml, REF.COMPT, p.grossUp
               ? '(B26/(1-(B29+B30))+B27/(1-B28)/(1-(B29+B30)))/1000' : 'B31', c.B29);
       if(!(f.distribuidora===undefined||f.distribuidora==='CELESC'))
