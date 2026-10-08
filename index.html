@@ -884,6 +884,30 @@ const my  = s => { const p=String(s).split('/'); return new Date(Date.UTC(+p[1],
 const R2  = v => Math.round(v*100)/100;
 
 /* ============ modelo de cálculo (espelha as fórmulas da planilha) ============ */
+/* Tarifa de Aplicação da CEMIG-D por ciclo tarifário (R$/MWh).
+   GD I compensa a tarifa cheia (direito adquirido). GD II paga a fração do Fio B da
+   Lei 14.300, que muda dentro do mesmo ciclo em 01/01/2026 (45% -> 60%).
+   A escolha é pela COMPETÊNCIA da fatura, não pela data de emissão: a CEMIG refaturou
+   as 12 competências de 06/2025 a 05/2026 todas em 12/06/2026. */
+const TARIFAS_CEMIG = [
+  {de:'2024-05-28', ate:'2025-05-27', reh:'REH 3.328/2024', tusd:486.18, te:313.51, fioB:247.60, frac:0.30},
+  {de:'2025-05-28', ate:'2025-12-31', reh:'REH 3.459/2025', tusd:541.30, te:317.28, fioB:257.21, frac:0.45},
+  {de:'2026-01-01', ate:'2026-05-27', reh:'REH 3.459/2025', tusd:541.30, te:317.28, fioB:257.21, frac:0.60},
+  {de:'2026-05-28', ate:'2027-05-27', reh:'REH 3.589/2026', tusd:593.08, te:310.21, fioB:268.19, frac:0.60}
+];
+/* competência 'MM/AAAA' -> tarifa do ciclo. Usa o dia 1º da competência. */
+function tarifaCemig(competencia, modalidade){
+  if(!competencia) return null;
+  const pr = String(competencia).split('/'); if(pr.length!==2) return null;
+  const d = pr[1]+'-'+pr[0]+'-01';
+  const faixa = TARIFAS_CEMIG.find(t => d >= t.de && d <= t.ate);
+  if(!faixa) return null;
+  const gd2 = /II/.test(modalidade||'');
+  return { tusd: R2(gd2 ? faixa.tusd - faixa.frac*faixa.fioB : faixa.tusd),
+           te: faixa.te, reh: faixa.reh, frac: faixa.frac, gd2 };
+}
+if (typeof module!=='undefined') module.exports = {tarifaCemig, TARIFAS_CEMIG};
+
 function calcular(f, p){                       // f = fatura lida, p = parâmetros do contrato
   const c = {};
   c.icms   = (f.icms   != null) ? f.icms   : p.icms;      // alíquota da fatura tem precedência
@@ -891,8 +915,22 @@ function calcular(f, p){                       // f = fatura lida, p = parâmetr
   c.cofins = (f.cofins != null) ? f.cofins : p.cofins;
   c.tribDaFatura = (f.icms!=null && f.pis!=null && f.cofins!=null);
   const tribI = c.icms, tribPC = c.pis + c.cofins;
-  c.P = p.tusd + p.te;
-  c.Q = (p.grossUp===false) ? c.P : (p.tusd/(1-tribPC) + p.te/(1-tribI)/(1-tribPC));
+  /* tarifa de referência: a do ciclo da competência quando a distribuidora tem tabela */
+  const tf = (f.distribuidora==='CEMIG') ? tarifaCemig(f.competencia, p.modalidade) : null;
+  c.tusd = tf ? tf.tusd : p.tusd;
+  c.te   = tf ? tf.te   : p.te;
+  c.reh  = tf ? tf.reh  : null;
+  if(tf && Math.abs((tf.tusd+tf.te)-(p.tusd+p.te))>0.005 && !f.avisouTarifa){
+    f.avisouTarifa = true;
+    const brl = v => v.toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
+    f.avisos.push(`Tarifa de referência trocada pela do ciclo da competência ${f.competencia}: `
+      + `${tf.reh}, ${p.modalidade||'GD I'}, TUSD ${brl(tf.tusd)} + TE ${brl(tf.te)} = `
+      + `${brl(tf.tusd+tf.te)} R$/MWh (o perfil traz ${brl(p.tusd+p.te)}). `
+      + 'A CEMIG refatura competências antigas com data de emissão atual, então a tarifa '
+      + 'segue a competência, nunca a emissão.');
+  }
+  c.P = c.tusd + c.te;
+  c.Q = (p.grossUp===false) ? c.P : (c.tusd/(1-tribPC) + c.te/(1-tribI)/(1-tribPC));
   c.B28 = c.P/1000;
   c.B29 = c.Q/1000;
   c.B18 = c.B28*(1-p.desagio);                          // Vunit
@@ -1003,7 +1041,9 @@ function mapaDados(f, p, c){
   m[R.EMP]=p.empresa; m[R.CNPJ]=p.cnpj; m[R.POT]=p.potencia; m[R.ECON]=p.energiaContratada;
   m[R.DBC]=XLDATE(p.dbContrato); m[R.REAJ]=p.reajuste; m[R.DESA]=p.desagio; m[R.RAT]=p.rateio;
   m[R.PRZ]=p.prazo; m[R.IMO]=p.imovel; m[R.EQP]=p.equip; m[R.OM]=p.om; m[R.VENC]=XLDATE(c.dtVenc);
-  m[R.TUSD]=p.tusd; m[R.TE]=p.te; m[R.ICMS]=c.icms; m[R.PIS]=c.pis; m[R.COF]=c.cofins;
+  m[R.TUSD]=c.tusd; m[R.TE]=c.te;
+  if(c.reh) m['A25']='3 · TARIFA DE REFERÊNCIA DA ENERGIA COMPENSADA — '+c.reh
+          + ' · ' + (p.modalidade||'GD I') + ' · ciclo da competência'; m[R.ICMS]=c.icms; m[R.PIS]=c.pis; m[R.COF]=c.cofins;
   m[R.SEMT]=c.B28; m[R.COMPT]=c.B29; m[R.VUN]=c.B18;
   m[R.INJF]=f.injFP; m[R.INJP]=f.injPT; m[R.CONF]=f.consFP; m[R.CONP]=f.consPT;
   m[R.SALD]=f.saldoFP; m[R.FATT]=c.B31;
@@ -1232,6 +1272,7 @@ const PERFIS = {
     empresa:'CONSÓRCIO RIACHINHO ENERGIAS RENOVÁVEIS GERAÇÃO COMPARTILHADA', cnpj:'42.258.476/0001-77',
     potencia:0, energiaContratada:0, dbContrato:'2025-03-01',
     reajuste:0, desagio:35, rateio:50, prazo:90, imovel:2500, equip:15000, om:7500,
+    modalidade:'GD II',
     tusd:432.17, te:310.21, icms:0, pis:0, cofins:0, grossUp:'Não', vlocEquipReaj:'Sim',
     baseCusto:'Total da fatura',
     banco:'707', agencia:'0001',
@@ -1241,6 +1282,7 @@ const PERFIS = {
     empresa:'REPRESENTAÇÕES TELECENTER LTDA', cnpj:'10.982.372/0001-14',
     potencia:0, energiaContratada:0, dbContrato:'2025-03-01',
     reajuste:0, desagio:35, rateio:50, prazo:90, imovel:12000, equip:72000, om:36000,
+    modalidade:'GD I',
     tusd:593.08, te:310.21, icms:0, pis:0, cofins:0, grossUp:'Não', vlocEquipReaj:'Sim',
     baseCusto:'Total da fatura',
     banco:'104', agencia:'1533',
@@ -1278,6 +1320,7 @@ const CAMPOS = [
  {k:'equip',    l:'Equipamento fixo (R$)',  t:'number', v:2000, st:'any'},
  {k:'om',       l:'O&M (R$)',               t:'number', v:1500, st:'any'},
  {s:'Tarifa de referência da energia compensada — as alíquotas só são usadas se a fatura não trouxer'},
+ {k:'modalidade', l:'Modalidade GD', t:'select', v:'GD I', op:['GD I','GD II']},
  {k:'tusd', l:'TUSD (R$/MWh)', t:'number', v:373.75, st:'any'},
  {k:'te',   l:'TE (R$/MWh)',   t:'number', v:321.93, st:'any'},
  {k:'icms', l:'ICMS (%) — reserva',   t:'number', v:17,   st:'any', pct:1},
