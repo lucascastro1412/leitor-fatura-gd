@@ -895,18 +895,24 @@ const TARIFAS_CEMIG = [
   {de:'2026-01-01', ate:'2026-05-27', reh:'REH 3.459/2025', tusd:541.30, te:317.28, fioB:257.21, frac:0.60},
   {de:'2026-05-28', ate:'2027-05-27', reh:'REH 3.589/2026', tusd:593.08, te:310.21, fioB:268.19, frac:0.60}
 ];
-/* competência 'MM/AAAA' -> tarifa do ciclo. Usa o dia 1º da competência. */
-function tarifaCemig(competencia, modalidade){
-  if(!competencia) return null;
-  const pr = String(competencia).split('/'); if(pr.length!==2) return null;
-  const d = pr[1]+'-'+pr[0]+'-01';
+/* data ISO a partir de 'MM/AAAA' (dia 1º) ou de 'DD/MM/AAAA' */
+function isoDe(txt){
+  if(!txt) return null;
+  const pr = String(txt).split('/');
+  if(pr.length===2) return pr[1]+'-'+pr[0]+'-01';
+  if(pr.length===3) return pr[2]+'-'+pr[1]+'-'+pr[0];
+  return null;
+}
+/* tarifa do ciclo vigente na data informada */
+function tarifaCemig(quando, modalidade){
+  const d = isoDe(quando); if(!d) return null;
   const faixa = TARIFAS_CEMIG.find(t => d >= t.de && d <= t.ate);
   if(!faixa) return null;
   const gd2 = /II/.test(modalidade||'');
   return { tusd: R2(gd2 ? faixa.tusd - faixa.frac*faixa.fioB : faixa.tusd),
            te: faixa.te, reh: faixa.reh, frac: faixa.frac, gd2 };
 }
-if (typeof module!=='undefined') module.exports = {tarifaCemig, TARIFAS_CEMIG};
+if (typeof module!=='undefined') module.exports = {tarifaCemig, TARIFAS_CEMIG, isoDe};
 
 function calcular(f, p){                       // f = fatura lida, p = parâmetros do contrato
   const c = {};
@@ -915,19 +921,33 @@ function calcular(f, p){                       // f = fatura lida, p = parâmetr
   c.cofins = (f.cofins != null) ? f.cofins : p.cofins;
   c.tribDaFatura = (f.icms!=null && f.pis!=null && f.cofins!=null);
   const tribI = c.icms, tribPC = c.pis + c.cofins;
-  /* tarifa de referência: a do ciclo da competência quando a distribuidora tem tabela */
-  const tf = (f.distribuidora==='CEMIG') ? tarifaCemig(f.competencia, p.modalidade) : null;
+  /* tarifa de referência: ciclo tarifário da CEMIG, pela emissão (padrão) ou pela
+     competência. A CEMIG refatura competências antigas com emissão atual, então as duas
+     bases divergem nessas faturas e o aviso sempre mostra quanto vale a diferença. */
+  c.baseTarifa = (p.baseTarifa === 'Competência') ? 'Competência' : 'Emissão da fatura';
+  const porEmis = (f.distribuidora==='CEMIG') ? tarifaCemig(f.emissao, p.modalidade) : null;
+  const porComp = (f.distribuidora==='CEMIG') ? tarifaCemig(f.competencia, p.modalidade) : null;
+  const tf  = (c.baseTarifa==='Competência') ? porComp : porEmis;
+  const alt = (c.baseTarifa==='Competência') ? porEmis : porComp;
   c.tusd = tf ? tf.tusd : p.tusd;
   c.te   = tf ? tf.te   : p.te;
   c.reh  = tf ? tf.reh  : null;
-  if(tf && Math.abs((tf.tusd+tf.te)-(p.tusd+p.te))>0.005 && !f.avisouTarifa){
+  if(tf && !f.avisouTarifa){
     f.avisouTarifa = true;
     const brl = v => v.toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
-    f.avisos.push(`Tarifa de referência trocada pela do ciclo da competência ${f.competencia}: `
-      + `${tf.reh}, ${p.modalidade||'GD I'}, TUSD ${brl(tf.tusd)} + TE ${brl(tf.te)} = `
-      + `${brl(tf.tusd+tf.te)} R$/MWh (o perfil traz ${brl(p.tusd+p.te)}). `
-      + 'A CEMIG refatura competências antigas com data de emissão atual, então a tarifa '
-      + 'segue a competência, nunca a emissão.');
+    const soma = t => t.tusd + t.te;
+    let msg = `Tarifa de referência: ${tf.reh}, ${p.modalidade||'GD I'}, `
+      + `TUSD ${brl(tf.tusd)} + TE ${brl(tf.te)} = ${brl(soma(tf))} R$/MWh, pelo ciclo da `
+      + (c.baseTarifa==='Competência' ? `competência ${f.competencia}.` : `emissão ${f.emissao}.`);
+    if(alt && Math.abs(soma(alt)-soma(tf))>0.005){
+      const E = (f.excFP!=null) ? f.excFP : 0;
+      const dif = E*(soma(tf)-soma(alt))/1000*(1-p.desagio);
+      msg += ` A fatura é refaturamento: competência ${f.competencia} contra emissão ${f.emissao}. `
+        + `Pela outra base (${c.baseTarifa==='Competência'?'emissão':'competência'}) a tarifa seria `
+        + `${brl(soma(alt))} R$/MWh e a medição mudaria em ${brl(Math.abs(dif))} `
+        + (dif>0 ? 'a menos.' : 'a mais.');
+    }
+    f.avisos.push(msg);
   }
   c.P = c.tusd + c.te;
   c.Q = (p.grossUp===false) ? c.P : (c.tusd/(1-tribPC) + c.te/(1-tribI)/(1-tribPC));
@@ -1043,7 +1063,7 @@ function mapaDados(f, p, c){
   m[R.PRZ]=p.prazo; m[R.IMO]=p.imovel; m[R.EQP]=p.equip; m[R.OM]=p.om; m[R.VENC]=XLDATE(c.dtVenc);
   m[R.TUSD]=c.tusd; m[R.TE]=c.te;
   if(c.reh) m['A25']='3 · TARIFA DE REFERÊNCIA DA ENERGIA COMPENSADA — '+c.reh
-          + ' · ' + (p.modalidade||'GD I') + ' · ciclo da competência'; m[R.ICMS]=c.icms; m[R.PIS]=c.pis; m[R.COF]=c.cofins;
+          + ' · ' + (p.modalidade||'GD I') + ' · ciclo pela ' + c.baseTarifa.toLowerCase(); m[R.ICMS]=c.icms; m[R.PIS]=c.pis; m[R.COF]=c.cofins;
   m[R.SEMT]=c.B28; m[R.COMPT]=c.B29; m[R.VUN]=c.B18;
   m[R.INJF]=f.injFP; m[R.INJP]=f.injPT; m[R.CONF]=f.consFP; m[R.CONP]=f.consPT;
   m[R.SALD]=f.saldoFP; m[R.FATT]=c.B31;
@@ -1321,6 +1341,8 @@ const CAMPOS = [
  {k:'om',       l:'O&M (R$)',               t:'number', v:1500, st:'any'},
  {s:'Tarifa de referência da energia compensada — as alíquotas só são usadas se a fatura não trouxer'},
  {k:'modalidade', l:'Modalidade GD', t:'select', v:'GD I', op:['GD I','GD II']},
+ {k:'baseTarifa',  l:'Ciclo tarifário pela', t:'select', v:'Emissão da fatura',
+  op:['Emissão da fatura','Competência']},
  {k:'tusd', l:'TUSD (R$/MWh)', t:'number', v:373.75, st:'any'},
  {k:'te',   l:'TE (R$/MWh)',   t:'number', v:321.93, st:'any'},
  {k:'icms', l:'ICMS (%) — reserva',   t:'number', v:17,   st:'any', pct:1},
