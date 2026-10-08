@@ -172,6 +172,7 @@ const NUM = '-?[\\d.]+,\\d+-?|-?\\d[\\d.]*-?';
 
 function parseFatura(lines){
   const cab = lines.slice(0,40).join('\n');
+  if(/CEMIG|06\\.?981\\.?180/i.test(cab)) return parseCemig(lines);
   if(/ENERGISA|03\\.?467\\.?321/i.test(cab)) return parseEnergisa(lines);
   if(/Ampla Energia|33\\.?050\\.?071/i.test(cab)) return parseAmpla(lines);
   if(/Copel Distribui|04\\.?368\\.?898/i.test(cab) || /DANF3E/i.test(cab)) return parseCopel(lines);
@@ -653,6 +654,209 @@ function parseAmpla(lines){
   return out;
 }
 if (typeof module!=='undefined') module.exports = {parseAmpla};
+
+/* ===== Leitor de fatura CEMIG (NF3-e) — unidade geradora Grupo A, THS Verde =====
+   A fatura da UG na CEMIG não declara "excedente distribuído": traz a injeção medida
+   e a energia compensada na própria UC. A base de energia é a injeção líquida.
+   A injeção é derivada de (leitura atual − anterior) × constante de medição, que é a
+   identidade que fecha nas 27 faturas de referência, e conferida contra o
+   Demonstrativo de Grandezas Faturadas (que tem células vazias e não é confiável
+   para leitura posicional depois que o pdf.js colapsa os espaços). */
+function parseCemig(lines){
+  const txt = lines.join('\n');
+  const out = { avisos: [], distribuidora:'CEMIG', layout:'cemig-nf3e-a4-verde' };
+  const W = m => out.avisos.push(m);
+  const num = s => { if(s==null) return null; s=String(s).trim();
+    const neg = /-$/.test(s); s = s.replace(/-$/,'').replace(/\./g,'').replace(',','.');
+    const v = parseFloat(s); return isNaN(v) ? null : (neg ? -v : v); };
+  const g = (re,i) => { const m = txt.match(re); return m ? m[i||1] : null; };
+  const MES = {JAN:'01',FEV:'02',MAR:'03',ABR:'04',MAI:'05',JUN:'06',
+               JUL:'07',AGO:'08',SET:'09',OUT:'10',NOV:'11',DEZ:'12'};
+
+  /* ---------- identificação ---------- */
+  const cab = txt.match(/^([A-Z]{3})\/(\d{4})\s+(\d{2}\/\d{2}\/\d{4})\s+(-?[\d.]*\d,\d{2})\s*$/m);
+  if(cab && MES[cab[1]]){
+    out.competencia = MES[cab[1]]+'/'+cab[2];
+    out.vencimentoFatura = cab[3];
+    out.total = num(cab[4]);
+  } else W('Não localizei a linha de competência/vencimento/valor a pagar.');
+
+  const em = txt.match(/Data de emiss[ãa]o:\s*(\d{2})[\/.](\d{2})[\/.](\d{4})/i);
+  out.emissao = em ? `${em[1]}/${em[2]}/${em[3]}` : null;
+  out.nf = g(/NOTA FISCAL N[ºo°]\s*(\d+)/i);
+  out.uc = g(/(\d{2}\.\d{3}\.\d{3}\.\d{3}-\d{2})/);
+  out.ucAntiga = null;
+  out.nome = g(/^Cliente:\s*([A-ZÀ-Ú][^\n]*?)\s+Unidade:/m)
+          || g(/^(ASSO DE COMP[^\n]*)$/m)
+          || g(/^(?!DOCUMENTO|CEMIG|AV\.|CEP|NOTA)([A-ZÀ-Ú][A-ZÀ-Ú0-9 .,&'-]{14,})$/m);
+  out.medidor = g(/Medidor:\s*([A-Z0-9]+)/i);
+  out.reimpressao = /REIMPRESS[ÃA]O/i.test(txt) || /emitida em substitui[çc][ãa]o/i.test(txt);
+
+  /* ---------- alíquotas (quadro Reservado ao Fisco) ----------
+     as linhas vêm intercaladas com o Histórico de Consumo, então não dá para ancorar
+     no início da linha: ICMS 42.702,54 18,00 7.686,45 */
+  const al = rot => { const m = txt.match(
+      new RegExp(`\\b${rot}\\s+[\\d.]*\\d,\\d{2}\\s+([\\d.]*\\d,\\d{2})\\s+[\\d.]*\\d,\\d{2}`));
+    return m ? num(m[1])/100 : null; };
+  out.pis = al('PASEP'); out.cofins = al('COFINS'); out.icms = al('ICMS');
+  if(out.pis==null||out.cofins==null||out.icms==null)
+    W('Não consegui ler PIS/COFINS/ICMS da fatura — o cálculo usou as alíquotas do perfil.');
+
+  /* ---------- itens da fatura ----------
+     bloco delimitado pelo cabeçalho "Itens da Fatura" e pela linha TOTAL, para não
+     capturar as linhas do Histórico de Consumo nem o rodapé fiscal. */
+  const iIni = lines.findIndex(l=>/^Itens da Fatura\b/i.test(l.trim()));
+  const iFim = lines.findIndex((l,k)=> k>iIni && /^TOTAL\s+-?[\d.]*\d,\d{2}/.test(l.trim()));
+  const bloco = (iIni>=0 && iFim>iIni) ? lines.slice(iIni+1, iFim) : [];
+  if(!bloco.length) W('Não localizei o bloco de itens da fatura (entre "Itens da Fatura" e "TOTAL").');
+
+  const reItem = /^(.+?)\s+(kWh|kVArh|kVAr|kVA|kW|UN)\s+(-?[\d.]*\d(?:,\d+)?)\s+(-?[\d.]*\d,\d{6,})\s+(-?[\d.]*\d,\d{2})\b/;
+  const reTar  = /(-?[\d.]*\d,\d{6,})\s*$/;
+  const reLump = /^([A-ZÀ-Ú][A-Za-zÀ-ú0-9 º°.,\/()%:-]{4,70}?)\s+(-?[\d.]*\d,\d{2})(?:\s|$)/;
+  out.itens = [];
+  for(const l0 of bloco){
+    const l = l0.trim(); if(!l) continue;
+    if(/^(ICMS|PIS|COFINS|PASEP|Base Calc)/i.test(l)) continue;
+    let m = l.match(reItem);
+    if(m){
+      const t = l.match(reTar);
+      out.itens.push({ desc:m[1].trim(), unid:m[2], qtd:num(m[3]),
+                       valor:num(m[5]), tarifaLiq: t?num(t[1]):null });
+      continue;
+    }
+    m = l.match(reLump);
+    if(m) out.itens.push({ desc:m[1].trim(), unid:null, qtd:null,
+                           valor:num(m[2]), tarifaLiq:null });
+  }
+  if(!out.itens.length) W('Nenhum item de fatura reconhecido — confira o layout do PDF.');
+
+  if(out.total==null) out.total = num(g(/^TOTAL\s+(-?[\d.]*\d,\d{2})/m));
+
+  /* ---------- abertura ---------- */
+  const soma = f => out.itens.filter(f).reduce((a,i)=>a+i.valor,0);
+  const eUlt = i => /Ultrapassagem/i.test(i.desc);
+  const eDem = i => /^Demanda\b/i.test(i.desc) && !eUlt(i);
+  const eRea = i => /Reativa|UFER|UFDR/i.test(i.desc);
+  const eBan = i => /Bandeira|Adicional Band/i.test(i.desc);
+  const eEne = i => /^Energia\b/i.test(i.desc) && !eRea(i) && !eBan(i);
+  out.abertura = [ soma(eDem), soma(eUlt), soma(eRea), soma(eEne), soma(eBan),
+                   soma(i=>!eDem(i)&&!eUlt(i)&&!eRea(i)&&!eBan(i)&&!eEne(i)) ];
+  const sAb = out.abertura.reduce((a,b)=>a+b,0);
+  if(out.total!=null && Math.abs(sAb-out.total)>0.05)
+    W(`Os itens somam R$ ${sAb.toFixed(2)} contra o total de R$ ${out.total.toFixed(2)} — diferença de R$ ${(sAb-out.total).toFixed(2)}.`);
+
+  /* ---------- lançamentos avulsos e base de custo "limpa" ---------- */
+  const eAvulso = i => /Multa|Juros|Corre[çc][ãa]o|Restitui[çc][ãa]o|Saldo para o pr[óo]ximo|Devolu[çc][ãa]o em dobro|Atualiza[çc][ãa]o monet/i.test(i.desc);
+  out.atraso    = soma(i=>/Multa|Juros|Corre[çc][ãa]o/i.test(i.desc));
+  out.credito   = soma(i=>/Restitui[çc][ãa]o|Saldo para o pr[óo]ximo|Devolu[çc][ãa]o em dobro|Atualiza[çc][ãa]o monet/i.test(i.desc));
+  out.cip = 0; out.subFat = null;
+  out.custoLimpo = (out.total!=null) ? out.total - soma(eAvulso) : null;
+  const avulsos = [];
+  if(Math.abs(out.atraso)>0.005)  avulsos.push(`juros/multa/correção R$ ${out.atraso.toFixed(2)}`);
+  if(Math.abs(out.credito)>0.005) avulsos.push(`restituição/saldo transferido R$ ${out.credito.toFixed(2)}`);
+  if(avulsos.length)
+    W(`A fatura traz lançamentos avulsos (${avulsos.join('; ')}). O total é R$ ${(out.total||0).toFixed(2)}, `
+      + `mas o custo do mês sem esses lançamentos é R$ ${out.custoLimpo.toFixed(2)}. Confira qual base a medição deve usar.`);
+
+  /* ---------- constante de medição (bloco CONSTANTES) ----------
+     varia por UC (350 em Riachinho, 1.400 em Salinas) e em algumas faturas o fator
+     de carga aparece entre o rótulo do segmento e o "kWh". */
+  const iC = lines.findIndex(l=>/CONSTANTES/i.test(l));
+  let constante = null;
+  if(iC>=0) for(let k=iC; k<Math.min(iC+12, lines.length); k++){
+    const m = lines[k].trim().match(/(?:^|\s)kWh\s+([\d.]*\d(?:,\d+)?)\s*$/);
+    if(m){ constante = num(m[1]); break; }
+  }
+  out.constante = constante;
+  if(!constante) W('Não localizei a constante de medição no bloco CONSTANTES — a injeção não pôde ser derivada das leituras.');
+
+  /* ---------- leituras do medidor ----------
+     linha completa = 6 números (HFP ant/atual, HP ant/atual, HR ant/atual). */
+  const iL = lines.findIndex(l=>/^LEITURAS\s*$/i.test(l.trim()));
+  const iD = lines.findIndex((l,k)=> k>iL && /^DEMANDA\(kW\)/i.test(l.trim()));
+  const blocoL = (iL>=0 && iD>iL) ? lines.slice(iL, iD) : [];
+  const leitura = rot => {
+    const l = blocoL.find(x=>new RegExp(`^${rot}\\s`).test(x.trim()));
+    if(!l) return null;
+    const ns = (l.trim().replace(new RegExp(`^${rot}\\s*`),'').match(/-?[\d.]*\d(?:,\d+)?/g)||[]).map(num);
+    if(ns.length!==6){
+      W(`A linha "${rot}" das LEITURAS trouxe ${ns.length} valores em vez de 6 — há célula vazia no quadro `
+        + 'e a leitura por posição não é confiável. Confira a injeção manualmente.');
+      return null;
+    }
+    return { fpAnt:ns[0], fpAtu:ns[1], ptAnt:ns[2], ptAtu:ns[3] };
+  };
+  const lInj = leitura('kWh Injet\\.');
+  const lCon = leitura('kWh');
+
+  if(constante && lInj){ out.injFP = (lInj.fpAtu-lInj.fpAnt)*constante; out.injPT = (lInj.ptAtu-lInj.ptAnt)*constante; }
+  if(constante && lCon){ out.consFP = (lCon.fpAtu-lCon.fpAnt)*constante; out.consPT = (lCon.ptAtu-lCon.ptAnt)*constante; }
+
+  /* fallback e conferência contra o Demonstrativo de Grandezas */
+  const iE = lines.findIndex(l=>/^ENERGIA \(kWh\)/i.test(l.trim()));
+  const nsDe = rot => lines.slice(iE<0?0:iE).filter(x=>new RegExp(rot,'i').test(x))
+    .map(l=>(l.match(/-?[\d.]*\d(?:,\d+)?/g)||[]).map(num));
+  const demInj = nsDe('Energia Injetada'), demAtv = nsDe('Energia ativa');
+  if(out.injFP==null && demInj[0] && demInj[0].length){ out.injFP = demInj[0][0];
+    W('A injeção veio do Demonstrativo de Grandezas, sem a conferência pelas leituras.'); }
+  if(out.consFP==null && demAtv[0] && demAtv[0].length){ out.consFP = demAtv[0][0]; }
+  /* identidade de regressão: (leitura atual − anterior) × constante = Energia Injetada Registrado */
+  const confIdent = (v, ns, posto) => {
+    if(v==null || !ns || !ns.length) return;
+    if(v===0 && !ns.length) return;
+    if(!ns.some(x=>Math.abs(x-v)<1))
+      W(`Conferência de injeção ${posto} falhou: (leitura atual − anterior) × constante = `
+        + `${v.toLocaleString('pt-BR')} kWh, mas o Demonstrativo de Grandezas traz `
+        + `${ns.map(x=>x.toLocaleString('pt-BR')).join(' / ')}. Confira a fatura.`);
+  };
+  confIdent(out.injFP, demInj[0], 'fora ponta');
+  if(out.injPT) confIdent(out.injPT, demInj[1], 'ponta');
+
+  /* conferência do consumo contra o item faturado */
+  const itCons = out.itens.find(i=>/^Energia (SCEE|Ativa)\b.*HFP/i.test(i.desc) && i.qtd!=null);
+  if(out.consFP!=null && itCons && Math.abs(itCons.qtd-out.consFP)>1)
+    W(`O consumo derivado das leituras (${out.consFP.toLocaleString('pt-BR')} kWh) não bate com o item `
+      + `"${itCons.desc}" (${itCons.qtd.toLocaleString('pt-BR')} kWh).`);
+  if(out.injFP==null) W('Não consegui determinar a energia injetada desta fatura.');
+
+  /* ---------- tarifas por posto (coluna Tarifa Unit.) ---------- */
+  const tar = re => { const i = out.itens.find(x=>re.test(x.desc)); return i&&i.tarifaLiq?Math.abs(i.tarifaLiq):null; };
+  out.teFP = tar(/^Energia (SCEE|Ativa|compensada)\b.*\bHFP\b/i);
+  out.tePT = tar(/^Energia (SCEE|Ativa|compensada)\b.*\bHP\b/i);
+
+  /* ---------- saldo de geração ---------- */
+  const sal = txt.match(/SALDO ATUAL DE GERA[ÇC][ÃA]O:\s*([\d.]*\d,\d{2})\s*kWh PONTA,\s*([\d.]*\d,\d{2})\s*kWh F\.\s*PONTA/i);
+  out.saldoPT = sal?num(sal[1]):null; out.saldoFP = sal?num(sal[2]):null;
+  if(sal && out.reimpressao)
+    W('Esta fatura é reimpressão/substituição e o "SALDO ATUAL DE GERAÇÃO" impresso costuma ser retrato '
+      + 'da data da reimpressão, não o saldo da competência. Não use esse campo como série histórica.');
+
+  /* ---------- base de energia da medição ----------
+     a CEMIG não imprime excedente distribuído: a base é a injeção líquida. */
+  if(out.injFP!=null)
+    out.excFP = (out.injFP+(out.injPT||0)) - ((out.consFP||0)+(out.consPT||0));
+  out.convFP = 0;
+
+  W('CEMIG: a fatura da unidade geradora não declara "excedente de energia distribuído". '
+    + `A base de remuneração aqui é a injeção líquida (injetada ${((out.injFP||0)+(out.injPT||0)).toLocaleString('pt-BR')} kWh `
+    + `− consumo da própria usina ${(((out.consFP||0)+(out.consPT||0))).toLocaleString('pt-BR')} kWh = `
+    + `${(out.excFP||0).toLocaleString('pt-BR')} kWh). Quanto disso virou crédito para beneficiária só o extrato da plataforma mostra.`);
+
+  const ult = out.itens.filter(eUlt);
+  if(ult.length && Math.abs(out.abertura[1])>0.005)
+    W(`Ultrapassagem de demanda de geração cobrada: R$ ${out.abertura[1].toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2})}. `
+      + 'Vale rever a demanda de geração contratada.');
+  if(Math.abs(out.abertura[2])>0.005)
+    W(`Energia reativa excedente cobrada: R$ ${out.abertura[2].toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2})}.`);
+  if(/Faturamento pela m[ée]dia/i.test(txt))
+    W('A fatura traz "Faturamento pela média" — as grandezas do mês não foram medidas normalmente. '
+      + 'Confira a competência antes de fechar a medição.');
+  if(out.total===0) W('A fatura fechou em R$ 0,00 — há crédito compensando o valor do mês. '
+    + 'Confira se o repasse de custo deve considerar esse mês como zero.');
+  return out;
+}
+if (typeof module!=='undefined') module.exports = {parseCemig};
+
 </script>
 <script>/* ============ util ============ */
 const XLDATE = d => Math.round((d - new Date(Date.UTC(1899,11,30))) / 86400000);
@@ -736,8 +940,13 @@ function setFormula(xml, ref, formula, valor){
   const re = new RegExp('<c r="'+ref+'"([^>]*?)(?:/>|>([\\s\\S]*?)</c>)');
   const m = xml.match(re);
   if(!m) return xml;
-  const attrs = (m[1]||'').replace(/\s*t="[^"]*"/g,'');
-  const v = (typeof valor==='number' && isFinite(valor)) ? '<v>'+valor+'</v>' : '';
+  let attrs = (m[1]||'').replace(/\s*t="[^"]*"/g,'');
+  let v = '';
+  if(typeof valor==='number' && isFinite(valor)) v = '<v>'+valor+'</v>';
+  else if(typeof valor==='string' && valor!==''){
+    attrs += ' t="str"';
+    v = '<v>'+valor.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</v>';
+  }
   return xml.replace(re, () => '<c r="'+ref+'"'+attrs+'><f>'+formula+'</f>'+v+'</c>');
 }
 function limparVazias(xml, refs, forcar){
@@ -804,7 +1013,7 @@ function mapaDados(f, p, c){
 function mapaMascara(f, p, c){
   const vc={B:XLDATE(c.dtVencImovel), F:XLDATE(c.dtVenc), L:XLDATE(c.dtVencOM)};
   const m={
-    D6:XLDATE(c.dtComp), D8:f.uc, I8:p.potencia, M8:p.energiaContratada,
+    D6:XLDATE(c.dtComp), D8:f.uc, I8:p.potencia||'', M8:p.energiaContratada||'',
     D10:p.empresa, M10:p.cnpj, D12:XLDATE(p.dbContrato), I12:c.B18, N12:p.reajuste,
     D15:p.imovel, H15:c.H15, D16:p.equip, H16:c.H16, D17:p.om, H17:c.H17,
     D19:c.B30, I19:c.B29, N19:c.B31,
@@ -824,7 +1033,7 @@ function mapaConferencia(f, p, c){
   const tol=(a,b,t)=>Math.abs(R2(a-b))<=t?'OK':'VERIFICAR';
   const m={
     B3:`UC ${f.uc||'—'} · competência ${f.competencia||'—'} · NF ${f.nf||'—'} · emissão ${f.emissao||'—'} · total R$ ${(f.total||0).toLocaleString('pt-BR',{minimumFractionDigits:2})}`,
-    B4:`${f.nome||''}${f.cnpj?' · CNPJ '+f.cnpj:''}${f.layout?' · layout '+(f.layout==='pre-1095'?'anterior à REN 1095/24':'pós REN 1095/24'):''}`
+    B4:`${f.nome||''}${f.cnpj?' · CNPJ '+f.cnpj:''}${f.distribuidora&&f.distribuidora!=='CELESC'?' · '+f.distribuidora:(f.layout?' · layout '+(f.layout==='pre-1095'?'anterior à REN 1095/24':'pós REN 1095/24'):'')}`
   };
   const lidos=[f.uc,f.ucAntiga,XLDATE(c.dtComp),XLDATE(c.dtEmissao),c.B31,f.injFP,f.injPT,f.consFP,f.consPT,c.F37,c.F38,c.F40];
   const crus =[f.uc,f.ucAntiga,f.competencia,f.emissao,f.total,f.injFP,f.injPT,f.consFP,f.consPT,f.teFP,f.tePT,f.excFP];
@@ -875,6 +1084,12 @@ async function gerarXlsx(JSZipCls, templateBytes, f, p){
       const v = alvo[arq][k]; return v===''||v===null||v===undefined; });
     let xml = await zip.file(arq).async('string');
     xml = setCells(xml, alvo[arq], faltando);
+    if(arq==='xl/worksheets/sheet1.xml' && !(f.distribuidora===undefined||f.distribuidora==='CELESC')){
+      /* sem conversão entre postos a fórmula de status recalcularia para "OK";
+         troca por um literal para o arquivo não mudar de texto ao abrir no Excel. */
+      xml = setFormula(xml, 'E'+CONF.CHK,     '"NÃO SE APLICA"', 'NÃO SE APLICA');
+      xml = setFormula(xml, 'E'+(CONF.CHK+1), '"NÃO SE APLICA"', 'NÃO SE APLICA');
+    }
     if(arq==='xl/worksheets/sheet3.xml')
       xml = setFormula(xml, 'D31', p.vlocEquipReaj ? 'Dados!B21*(1+Dados!B16)+N23' : 'Dados!B21+N23', c.D31);
     if(arq==='xl/worksheets/sheet2.xml'){
@@ -984,6 +1199,24 @@ const PERFIS = {
     contaEquip:'33209-9', contaOM:'33209-9', contaImovel:'33209-9', pix:'18.464.912/0001-80',
     comissaoMWh:3.54, comissaoTipo:'% sobre contratos',
     comissaoEmp:'LIGA EMPREENDIMENTOS IMOBILIARIOS LTDA', comissaoCnpj:'23.267.601/0001-60'
+  },
+  'UFV Riachinho II — Fazenda Logradouro, Riachinho/MG (CEMIG) — GD II': {
+    empresa:'CONSÓRCIO RIACHINHO ENERGIAS RENOVÁVEIS GERAÇÃO COMPARTILHADA', cnpj:'42.258.476/0001-77',
+    potencia:0, energiaContratada:0, dbContrato:'2025-03-01',
+    reajuste:0, desagio:35, rateio:50, prazo:90, imovel:2500, equip:15000, om:7500,
+    tusd:432.17, te:310.21, icms:0, pis:0, cofins:0, grossUp:'Não', vlocEquipReaj:'Sim',
+    baseCusto:'Total da fatura',
+    banco:'707', agencia:'0001',
+    contaEquip:'1515896-0', contaOM:'1515896-0', contaImovel:'1515896-0', pix:'42.258.476/0001-77'
+  },
+  'UFV Salinas — Fazenda Cubículo, Salinas/MG (CEMIG) — GD I': {
+    empresa:'REPRESENTAÇÕES TELECENTER LTDA', cnpj:'10.982.372/0001-14',
+    potencia:0, energiaContratada:0, dbContrato:'2025-03-01',
+    reajuste:0, desagio:35, rateio:50, prazo:90, imovel:12000, equip:72000, om:36000,
+    tusd:593.08, te:310.21, icms:0, pis:0, cofins:0, grossUp:'Não', vlocEquipReaj:'Sim',
+    baseCusto:'Total da fatura',
+    banco:'104', agencia:'1533',
+    contaEquip:'3348-6', contaOM:'3348-6', contaImovel:'3348-6', pix:'10.982.372/0001-14'
   },
   'UFV Porto Real (5 UCs) — SPE Porto Real Isollar CDL (Ampla/Enel RJ)': {
     empresa:'SPE PORTO REAL ISOLLAR CDL LTDA', cnpj:'56.124.521/0001-05',
@@ -1182,7 +1415,7 @@ async function processar(files){
     try{
       const f = await lerPdf(file);
       if(f.total==null || f.injFP==null) throw new Error(
-        'Não reconheci o layout desta fatura. Hoje o leitor entende Celesc, Copel, Energisa e Ampla/Enel RJ (Grupo A); '
+        'Não reconheci o layout desta fatura. Hoje o leitor entende Celesc, Copel, Energisa, Ampla/Enel RJ e CEMIG (Grupo A); '
         + 'confira se o PDF é a fatura da unidade geradora.');
       const r = await gerarXlsx(JSZip, TPL, f, p);
       const nome = nomeArquivo(f,p);
