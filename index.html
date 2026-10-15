@@ -995,6 +995,19 @@ function calcular(f, p){                       // f = fatura lida, p = parâmetr
   c.B35 = c.B30*c.B18 - p.equip*(1+p.reajuste) + c.B34 + c.B37;   // Vperf
   c.B36 = (p.vlocEquipReaj ? p.equip*(1+p.reajuste) : p.equip) + c.B35;  // Vlocação
   c.C36 = c.B30 ? (p.imovel+p.om+c.B36)/c.B30 : 0;
+  /* identidade de fechamento: no fim, todo contrato é energia × tarifa menos a fatura.
+     imóvel_reaj + Vlocação + O&M_reaj = receita + VB − base de custo. */
+  c.somaContratos = R2(p.imovel*(1+p.reajuste) + c.B36 + p.om*(1+p.reajuste));
+  c.alvoContratos = R2(c.B30*c.B18 + c.B37 - c.B31);
+  c.difContratos  = R2(c.somaContratos - c.alvoContratos);
+  if(Math.abs(c.difContratos) > 0.01 && !f.avisouIdent){
+    f.avisouIdent = true;
+    const brl = v => 'R$ '+v.toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
+    f.avisos.push(`As três linhas de contrato somam ${brl(c.somaContratos)}, mas energia × tarifa `
+      + `menos a fatura dá ${brl(c.alvoContratos)} — diferença de ${brl(c.difContratos)}. `
+      + 'Isso só acontece quando o Vperf e a Vlocação usam bases diferentes para o equipamento; '
+      + 'confira o campo "Vlocação soma equipamento reajustado" no perfil da usina.');
+  }
   c.comMWh = (p.comissaoMWh!=null && p.comissaoMWh!=='' ) ? Number(p.comissaoMWh) : null;
   c.comPct = (p.comissaoTipo === '% sobre contratos');
   // base da comissão percentual: a soma das três linhas de contrato da máscara
@@ -1249,7 +1262,7 @@ const PERFIS = {
     empresa:'UFV LIDER AIPF SPE LTDA', cnpj:'54.264.795/0001-74',
     potencia:300, energiaContratada:60435, dbContrato:'2025-09-01',
     reajuste:0, desagio:28, rateio:50, prazo:90, imovel:700, equip:2000, om:1500,
-    tusd:373.75, te:321.93, icms:17, pis:1.10, cofins:5.06, grossUp:'Sim',
+    tusd:373.75, te:321.93, icms:17, pis:1.10, cofins:5.06, grossUp:'Sim', vlocEquipReaj:'Sim',
     banco:'Sicoob Maxicredito', agencia:'3069',
     contaEquip:'474.266-4', contaOM:'474.266-5', contaImovel:'474.266-6', pix:''
   },
@@ -1257,7 +1270,7 @@ const PERFIS = {
     empresa:'F&N SOLAR ENERGY LTDA.', cnpj:'54.705.909/0001-74',
     potencia:300, energiaContratada:60435, dbContrato:'2025-10-01',
     reajuste:0, desagio:28, rateio:50, prazo:90, imovel:700, equip:2000, om:1500,
-    tusd:373.75, te:321.93, icms:17, pis:1.10, cofins:5.06, grossUp:'Sim',
+    tusd:373.75, te:321.93, icms:17, pis:1.10, cofins:5.06, grossUp:'Sim', vlocEquipReaj:'Sim',
     banco:'133', agencia:'2613',
     contaEquip:'45696-9', contaOM:'45696-9', contaImovel:'45696-9', pix:'54.705.909/0001-74'
   },
@@ -1265,7 +1278,7 @@ const PERFIS = {
     empresa:'FAZENDA BEIRA LAGO ENERGIA LTDA', cnpj:'52.903.647/0001-27',
     potencia:300, energiaContratada:54750, dbContrato:'2024-06-01',
     reajuste:5.31964, desagio:25, rateio:50, prazo:90, imovel:1500, equip:10000, om:3700,
-    tusd:373.75, te:321.93, icms:17, pis:1.10, cofins:5.06, grossUp:'Sim',
+    tusd:373.75, te:321.93, icms:17, pis:1.10, cofins:5.06, grossUp:'Sim', vlocEquipReaj:'Sim',
     banco:'Banco do Brasil', agencia:'0321-2',
     contaEquip:'130.295-7', contaOM:'130.295-7', contaImovel:'130.295-7', pix:''
   },
@@ -1281,7 +1294,7 @@ const PERFIS = {
     empresa:'NOROESTE ENERGIA LTDA', cnpj:'35.079.560/0002-49',
     potencia:2000, energiaContratada:436196, dbContrato:'2024-06-27',
     reajuste:5.31964, desagio:26, rateio:50, prazo:90, imovel:15120.80, equip:50000, om:15120.80,
-    tusd:457.17, te:310.85, icms:19, pis:1.57, cofins:7.21, grossUp:'Não',
+    tusd:457.17, te:310.85, icms:19, pis:1.57, cofins:7.21, grossUp:'Não', vlocEquipReaj:'Sim',
     banco:'208 - BTG', agencia:'50',
     contaEquip:'435214-6', contaOM:'435214-6', contaImovel:'435214-6', pix:'35.079.560/0001-68'
   },
@@ -1289,7 +1302,7 @@ const PERFIS = {
     empresa:'FTS GERAÇÃO DE ENERGIA S.A.', cnpj:'45.192.849/0001-42',
     potencia:1500, energiaContratada:273750, dbContrato:'2024-07-29',
     reajuste:5.35117, desagio:24, rateio:50, prazo:60, imovel:3500, equip:10000, om:6000,
-    tusd:457.17, te:310.85, icms:19, pis:1.54, cofins:7.07, grossUp:'Não',
+    tusd:457.17, te:310.85, icms:19, pis:1.54, cofins:7.07, grossUp:'Não', vlocEquipReaj:'Sim',
     banco:'BRADESCO', agencia:'3645',
     contaEquip:'7363-6', contaOM:'7363-6', contaImovel:'7363-6', pix:'45.192.849/0001-42'
   },
@@ -1389,7 +1402,7 @@ const CAMPOS = [
  {k:'comissaoPix',     l:'PIX da comissão',     t:'text', v:''},
  {s:'Tratamento de tributos'},
  {k:'grossUp', l:'Aplicar gross-up na tarifa compensada', t:'select', v:'Sim', op:['Sim','Não']},
- {k:'vlocEquipReaj', l:'Vlocação soma equipamento reajustado', t:'select', v:'Não', op:['Sim','Não']},
+ {k:'vlocEquipReaj', l:'Vlocação soma equipamento reajustado', t:'select', v:'Sim', op:['Sim','Não']},
  {k:'baseCusto', l:'Custo da fatura na medição', t:'select', v:'Total da fatura',
   op:['Total da fatura','Faturamento do mês + CIP']}
 ];
