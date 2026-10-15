@@ -452,7 +452,8 @@ function parseEnergisa(lines){
   if(!out.competencia) W('Não localizei a linha de competência/vencimento/total.');
   out.emissao = g(/DATA DE EMISS[ÃA]O:\s*(\d{2}\/\d{2}\/\d{4})/i);
   const nf = g(/NOTA FISCAL N[ºo°]:\s*([\d.]+)/i); out.nf = nf ? nf.replace(/\./g,'') : null;
-  out.uc = g(/\b(\d{3}\.\d{3}\.\d{3}-\d{2})\b/)
+  out.uc = g(/(\d\.\d{3}\.\d{3}\.\d{3}-\d{2})/)      // Sul-Sudeste: 1.632.447.006-28
+        || g(/(?<![\d.])(\d{3}\.\d{3}\.\d{3}-\d{2})/)   // MT: 123.456.789-01
         || (g(/MATR[ÍI]CULA:\s*(\d{7,12})/i) || g(/D[ÉE]BITO AUTOM[ÁA]TICO UTILIZANDO O C[ÓO]DIGO:\s*(\d{7,12})/i));
   if(out.uc && !/\./.test(out.uc)){ out.uc = String(Number(out.uc));
     W(`UC no formato anterior (${out.uc}). A Energisa avisa na fatura que o número seria alterado por determinação da ANEEL.`); }
@@ -525,12 +526,20 @@ function parseEnergisa(lines){
   if(aFP && consFPitem && (aFP.atu-aFP.ant)>0) K = consFPitem/(aFP.atu-aFP.ant);
   if(K){ const r = Math.round(K); if(Math.abs(K-r)/r < 0.01) K = r; }
   out.constante = K;
-  if(!K) W('Não consegui calibrar a constante do medidor — a energia injetada pode estar incorreta.');
+  const mexeu = (iFP && Math.abs(iFP.atu-iFP.ant)>1e-9) || (iPT && Math.abs(iPT.atu-iPT.ant)>1e-9);
+  if(!K && mexeu) W('Não consegui calibrar a constante do medidor — a energia injetada pode estar incorreta.');
 
   out.consFP = consFPitem; out.consPT = consPTitem;
-  out.injFP = (iFP && K) ? Math.round((iFP.atu-iFP.ant)*K*100)/100 : null;
-  out.injPT = (iPT && K) ? Math.round((iPT.atu-iPT.ant)*K*100)/100 : null;
-  if(out.injFP==null) W('Não achei a linha de energia injetada no quadro de medição.');
+  /* leitura parada no mês é injeção zero — não depende de calibrar a constante */
+  const inj = r => { if(!r) return null;
+    const d = r.atu - r.ant;
+    if(Math.abs(d) < 1e-9) return 0;
+    return K ? Math.round(d*K*100)/100 : null; };
+  out.injFP = inj(iFP); out.injPT = inj(iPT);
+  if(iFP==null) W('Não achei a linha de energia injetada no quadro de medição — '
+    + 'confira se a fatura é de faturamento pela média, quando a usina não injetou.');
+  else if(out.injFP==null) W('Achei a linha de energia injetada mas não a constante do medidor; '
+    + 'a injeção não pôde ser calculada.');
 
   const sal = txt.match(/Saldo Ac:\s*([\d.]+)\(P\)\s*([\d.]+)\(FP\)/i);
   out.saldoPT = sal?num(sal[1]+',00'):null; out.saldoFP = sal?num(sal[2]+',00'):null;
@@ -1343,6 +1352,18 @@ const PERFIS = {
     baseCusto:'Total da fatura',
     banco:'104', agencia:'1533',
     contaEquip:'3348-6', contaOM:'3348-6', contaImovel:'3348-6', pix:'10.982.372/0001-14'
+  },
+  'UFV Adolfo I.1 + I.2 — Guaraci Energia (Energisa Sul-Sudeste)': {
+    empresa:'GUARACI ENERGIA LTDA', cnpj:'41.386.717/0001-09',
+    potencia:3625, energiaContratada:661563, dbContrato:'2025-08-23',
+    reajuste:0, desagio:30, rateio:50, prazo:90, prazoOM:90, prazoImovel:90,
+    imovel:50000, equip:100000, om:70000,
+    modalidade:'GD I', baseTarifa:'Emissão da fatura',
+    tusd:423.67, te:322.09, icms:18, pis:1.1851, cofins:5.4586,
+    grossUp:'Não', vlocEquipReaj:'Sim', baseCusto:'Total da fatura',
+    banco:'Santander', agencia:'0161',
+    contaEquip:'13.005084-1', contaOM:'13.005084-1', contaImovel:'13.005084-1',
+    pix:'41.386.717/0001-09'
   },
   'UFV Porto Real (5 UCs) — SPE Porto Real Isollar CDL (Ampla/Enel RJ)': {
     empresa:'SPE PORTO REAL ISOLLAR CDL LTDA', cnpj:'56.124.521/0001-05',
