@@ -173,13 +173,16 @@ const NUM = '-?[\\d.]+,\\d+-?|-?\\d[\\d.]*-?';
 /* Regra do contrato: quando a fatura traz desconto por pagamento em duplicidade, a base
    de custo da medição é o valor que a fatura teria sem esse lançamento — nunca o total
    abatido. Vale para qualquer distribuidora que classifique esses itens. */
-function baseSemDupl(out, valorDupl, W){
+function baseSemDupl(out, valorDupl, W, itens){
   if(out.total==null || Math.abs(valorDupl)<=0.005) return null;
   const base = Math.round((out.total - valorDupl)*100)/100;
   const brl = v => 'R$ '+v.toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
-  W(`A fatura abate ${brl(Math.abs(valorDupl))} de pagamento em duplicidade e fechou em `
-    + `${brl(out.total)}. A medição usa ${brl(base)}, que é o que a fatura seria sem esse `
-    + 'abatimento — é a regra do contrato, não uma escolha da leitura.');
+  const lista = (itens && itens.length)
+      ? itens.map(i=>`${i.desc} ${brl(i.valor)}`).join('; ')
+      : 'pagamento em duplicidade '+brl(valorDupl);
+  W(`A fatura fechou em ${brl(out.total)} porque traz lançamentos que não são custo do mês `
+    + `(${lista}). A medição usa ${brl(base)}, que é o que a fatura seria sem eles — `
+    + 'é a regra do contrato, não uma escolha da leitura.');
   return base;
 }
 if (typeof module!=='undefined') module.exports = {baseSemDupl};
@@ -387,14 +390,26 @@ function parseCopel(lines){
   }
   const soma=f=>out.itens.filter(f).reduce((a,i)=>a+i.valor,0);
   const eBan=i=>/BAND/i.test(i.desc);
-  const eDem=i=>/^DEMANDA USD/i.test(i.desc);
+  /* DEMANDA INJETADA TP TUSD é a maior rubrica da fatura das usinas Copel e também é
+     demanda: sem ela a abertura mostrava R$ 908 onde havia R$ 52 mil. */
+  const eDem=i=>/^DEMANDA\b/i.test(i.desc);
   const eRea=i=>/REAT\.? EXCED/i.test(i.desc);
   const eEne=i=>!eBan(i)&&/^ENERGIA (ELETRICA|INJETADA|INJ\.)/i.test(i.desc);
+  /* lançamentos que zeram a fatura sem serem custo do mês: compensação por interrupção
+     (DIC/FIC), crédito trazido da fatura anterior, saldo devolvido adiante, duplicidade */
+  const eCred=i=>/DURACAO INTERRUP|SALDO DE CREDITOS|SALDO A DEVOLVER|Duplicidade|DEVOLUCAO|RESTITUI/i.test(i.desc);
   out.abertura=[ soma(eDem), 0, soma(eRea), soma(eEne), soma(eBan),
-                 soma(i=>!eDem(i)&&!eRea(i)&&!eBan(i)&&!eEne(i)) ];
+                 soma(i=>!eDem(i)&&!eRea(i)&&!eBan(i)&&!eEne(i)&&!eCred(i)) ];
+  out.custoBase = baseSemDupl(out, soma(eCred), W, out.itens.filter(eCred));
   const sAb=out.abertura.reduce((a,b)=>a+b,0);
-  if(out.total!=null && Math.abs(sAb-out.total)>0.05)
-    W(`Os itens somam R$ ${sAb.toFixed(2)} contra o total de R$ ${out.total.toFixed(2)} — diferença de R$ ${(sAb-out.total).toFixed(2)}.`);
+  const alvoAb=(out.custoBase!=null)?out.custoBase:out.total;
+  if(alvoAb!=null && Math.abs(sAb-alvoAb)>0.05)
+    W(`Os itens somam R$ ${sAb.toFixed(2)} contra R$ ${alvoAb.toFixed(2)} — diferença de R$ ${(sAb-alvoAb).toFixed(2)}.`);
+  const interrup = soma(i=>/DURACAO INTERRUP/i.test(i.desc));
+  if(Math.abs(interrup)>0.005)
+    W(`A Copel creditou R$ ${Math.abs(interrup).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2})} `
+      + 'de compensação por interrupção (DIC/FIC). Esse crédito não é redução do custo do mês: '
+      + 'defina por contrato se ele fica com a ACER, que paga a fatura, ou com a geradora, que teve a usina parada.');
 
   /* mapeamento para o modelo de medição */
   out.injFP=out.geracaoFP; out.injPT=out.geracaoPT;
@@ -402,7 +417,8 @@ function parseCopel(lines){
     out.excFP = (out.geracaoFP+(out.geracaoPT||0)) - ((out.consFP||0)+(out.consPT||0));
   if(out.teFP && out.tePT){ out.fator = out.tePT/out.teFP; out.fatorEfetivo = out.fator; }
   out.convFP = 0;
-  if(out.total===0) W('A fatura fechou em R$ 0,00 — há crédito compensando o valor do mês. '
+  if(out.total===0 && out.custoBase==null)
+    W('A fatura fechou em R$ 0,00 — há crédito compensando o valor do mês. '
     + 'Confira se o repasse de custo deve considerar esse mês como zero.');
   return out;
 }
@@ -638,7 +654,7 @@ function parseAmpla(lines){
   const eDup2 = i=>/Duplicidade|N[ãa]o Loc|Cr[ée]dito Pr[óo]ximas Faturas/i.test(i.desc);
   out.abertura = [ s(eDem), 0, s(eRea), s(eEne), s(eBan),
                    s(i=>!eDem(i)&&!eRea(i)&&!eBan(i)&&!eEne(i)&&!eDup2(i)) ];
-  out.custoBase = baseSemDupl(out, s(eDup2), W);
+  out.custoBase = baseSemDupl(out, s(eDup2), W, out.itens.filter(eDup2));
   const sAb = out.abertura.reduce((a,b)=>a+b,0);
   const alvoAb = (out.custoBase!=null) ? out.custoBase : out.total;
   if(alvoAb!=null && Math.abs(sAb-alvoAb)>0.05)
@@ -759,7 +775,7 @@ function parseCemig(lines){
   const eEne = i => /^Energia\b/i.test(i.desc) && !eRea(i) && !eBan(i);
   out.abertura = [ soma(eDem), soma(eUlt), soma(eRea), soma(eEne), soma(eBan),
                    soma(i=>!eDem(i)&&!eUlt(i)&&!eRea(i)&&!eBan(i)&&!eEne(i)&&!eDupl(i)) ];
-  out.custoBase = baseSemDupl(out, soma(eDupl), W);
+  out.custoBase = baseSemDupl(out, soma(eDupl), W, out.itens.filter(eDupl));
   const sAb = out.abertura.reduce((a,b)=>a+b,0);
   const alvoAb = (out.custoBase!=null) ? out.custoBase : out.total;
   if(alvoAb!=null && Math.abs(sAb-alvoAb)>0.05)
@@ -1067,7 +1083,7 @@ function mapaDados(f, p, c){
   m[R.SEMT]=c.B28; m[R.COMPT]=c.B29; m[R.VUN]=c.B18;
   m[R.INJF]=f.injFP; m[R.INJP]=f.injPT; m[R.CONF]=f.consFP; m[R.CONP]=f.consPT;
   m[R.SALD]=f.saldoFP; m[R.FATT]=c.B31;
-  if(c.baseAjustada) m['A41']='Fatura da usina — base de custo, sem o pagamento em duplicidade (R$)';
+  if(c.baseAjustada) m['A41']='Fatura da usina — base de custo, sem os lançamentos que não são custo do mês (R$)';
   const temConv = (f.distribuidora===undefined || f.distribuidora==='CELESC');
   m[R.TEFP]=c.F37; m[R.TEPT]=c.F38; m[R.EXC]=c.F40;
   m[R.FTEO]=temConv?c.F39:''; m[R.CONV]=temConv?c.F41:'';
