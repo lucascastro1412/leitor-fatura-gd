@@ -402,21 +402,39 @@ function parseCopel(lines){
   const eDem=i=>/^DEMANDA\b/i.test(i.desc);
   const eRea=i=>/REAT\.? EXCED/i.test(i.desc);
   const eEne=i=>!eBan(i)&&/^ENERGIA (ELETRICA|INJETADA|INJ\.)/i.test(i.desc);
-  /* lançamentos que zeram a fatura sem serem custo do mês: compensação por interrupção
-     (DIC/FIC), crédito trazido da fatura anterior, saldo devolvido adiante, duplicidade */
-  const eCred=i=>/DURACAO INTERRUP|SALDO DE CREDITOS|SALDO A DEVOLVER|Duplicidade|DEVOLUCAO|RESTITUI/i.test(i.desc);
+  /* Dois tipos de crédito, com tratamentos opostos:
+
+     a) DEVOLUÇÃO DA DISTRIBUIDORA — compensação por interrupção (DIC/FIC) e o saldo que
+        ela gera rolando de um mês para o outro. A ACER não desembolsou nada, então não há
+        o que descontar da geradora: a base de custo é o total real da fatura, e o crédito
+        fica com a geradora. Esses lançamentos CONTINUAM na abertura.
+
+     b) PAGAMENTO EM DUPLICIDADE — devolução de dinheiro que já saiu do caixa. Aí a base
+        é o que a fatura seria sem o abatimento. Esses saem da abertura. */
+  const eDevol=i=>/DURACAO INTERRUP|SALDO DE CREDITOS|SALDO A DEVOLVER|DEVOLUCAO|RESTITUI/i.test(i.desc);
+  const eDupl =i=>/Duplicidade|N[ãa]o Loc/i.test(i.desc);
   out.abertura=[ soma(eDem), 0, soma(eRea), soma(eEne), soma(eBan),
-                 soma(i=>!eDem(i)&&!eRea(i)&&!eBan(i)&&!eEne(i)&&!eCred(i)) ];
-  out.custoBase = baseSemDupl(out, soma(eCred), W, out.itens.filter(eCred));
+                 soma(i=>!eDem(i)&&!eRea(i)&&!eBan(i)&&!eEne(i)&&!eDupl(i)) ];
+  out.custoBase = baseSemDupl(out, soma(eDupl), W, out.itens.filter(eDupl));
   const sAb=out.abertura.reduce((a,b)=>a+b,0);
   const alvoAb=(out.custoBase!=null)?out.custoBase:out.total;
   if(alvoAb!=null && Math.abs(sAb-alvoAb)>0.05)
     W(`Os itens somam R$ ${sAb.toFixed(2)} contra R$ ${alvoAb.toFixed(2)} — diferença de R$ ${(sAb-alvoAb).toFixed(2)}.`);
-  const interrup = soma(i=>/DURACAO INTERRUP/i.test(i.desc));
-  if(Math.abs(interrup)>0.005)
-    W(`A Copel creditou R$ ${Math.abs(interrup).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2})} `
-      + 'de compensação por interrupção (DIC/FIC). Esse crédito é da geradora, não abatimento do '
-      + 'custo do mês: a medição repassa a fatura cheia e o crédito é acertado por fora.');
+
+  const brlC = v => 'R$ '+Math.abs(v).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
+  const devol = out.itens.filter(eDevol);
+  if(devol.length && out.total!=null){
+    const bruto = out.total - devol.reduce((a,i)=>a+i.valor,0);
+    const interrup = soma(i=>/DURACAO INTERRUP/i.test(i.desc));
+    let msg = Math.abs(interrup)>0.005
+      ? `A Copel devolveu ${brlC(interrup)} de compensação por interrupção (DIC/FIC)`
+      : 'A fatura foi abatida por crédito que a Copel devolveu em competência anterior';
+    msg += `, e a fatura fechou em ${brlC(out.total)}. A medição usa esse valor, não os `
+         + `${brlC(bruto)} que a fatura teria sem a devolução: a ACER não desembolsou a diferença, `
+         + 'então não há o que descontar da geradora — a devolução é dela.';
+    W(msg);
+    out.devolucaoDist = true;
+  }
 
   /* mapeamento para o modelo de medição */
   out.injFP=out.geracaoFP; out.injPT=out.geracaoPT;
@@ -424,7 +442,7 @@ function parseCopel(lines){
     out.excFP = (out.geracaoFP+(out.geracaoPT||0)) - ((out.consFP||0)+(out.consPT||0));
   if(out.teFP && out.tePT){ out.fator = out.tePT/out.teFP; out.fatorEfetivo = out.fator; }
   out.convFP = 0;
-  if(out.total===0 && out.custoBase==null)
+  if(out.total===0 && out.custoBase==null && !out.devolucaoDist)
     W('A fatura fechou em R$ 0,00 — há crédito compensando o valor do mês. '
     + 'Confira se o repasse de custo deve considerar esse mês como zero.');
   return out;
